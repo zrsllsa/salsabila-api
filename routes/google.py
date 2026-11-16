@@ -161,7 +161,7 @@ def google_verify_otp(data: GoogleOtpRequest):
 
 
 @router.get("/google")
-def google_login(mode: str = "login"):
+def google_login(mode: str = "login", redirect: bool = False):
 
     try:
 
@@ -182,7 +182,9 @@ def google_login(mode: str = "login"):
 
         url = f"{SUPABASE_URL.rstrip('/')}/auth/v1/authorize?{query}"
 
-        response = JSONResponse({"url": url})
+        # redirect=true: browser membuka endpoint ini langsung (navigasi biasa), sehingga
+        # cookie dianggap first-party dan tidak diblokir browser walau FE & BE beda domain.
+        response = RedirectResponse(url=url, status_code=302) if redirect else JSONResponse({"url": url})
 
         response.set_cookie(
             key=COOKIE_NAME,
