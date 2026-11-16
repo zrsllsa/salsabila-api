@@ -117,7 +117,7 @@ def google_callback(
     oauth_code_verifier: str | None = Cookie(default=None),
     oauth_mode: str | None = Cookie(default=None),
 ):
-    print("GOOGLE CALLBACK DIPANGGIL, code ada:", bool(code), "error:", error)
+    print("GOOGLE CALLBACK DIPANGGIL, code ada:", bool(code), "error:", error, "| mode:", oauth_mode)
 
     error_redirect = RedirectResponse(
         url=f"{FRONTEND_URL}/#error=Login%20Google%20gagal",
