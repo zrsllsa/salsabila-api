@@ -2,20 +2,12 @@ import base64
 import hashlib
 import os
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, Cookie, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel, EmailStr
-
-from routes.register import (
-    OTP_EXPIRE_MINUTES,
-    generate_otp,
-    hash_otp,
-    send_verification_email,
-)
 from supabase_client import SUPABASE_URL, get_supabase_admin, get_supabase_anon
 
 load_dotenv()
@@ -49,115 +41,19 @@ def make_pkce_pair():
     return verifier, challenge
 
 
-MAX_OTP_ATTEMPTS = 5
-
-
-def needs_otp(user) -> bool:
+def is_new_google_user(user) -> bool:
     """
-    Butuh OTP kalau belum pernah diverifikasi dan belum punya login email+password
-    (akun email+password sudah diverifikasi OTP saat register).
+    Akun Google yang belum pernah diaktifkan (bukan akun email+password
+    dan belum ditandai terdaftar oleh register Google).
     """
 
-    if (user.app_metadata or {}).get("otp_verified"):
+    meta = user.app_metadata or {}
+
+    # otp_verified: akun Google lama dari versi sebelum OTP dihapus
+    if meta.get("registered") or meta.get("otp_verified"):
         return False
 
     return not any(i.provider == "email" for i in (user.identities or []))
-
-
-def send_google_otp(email: str, user_id: str, name: str):
-    admin = get_supabase_admin()
-    otp = generate_otp()
-    now = datetime.now(timezone.utc)
-
-    admin.table("pending_registrations").delete().eq("email", email).execute()
-    admin.table("pending_registrations").insert({
-        "name": name,
-        "email": email,
-        "user_id": user_id,
-        "otp_hash": hash_otp(otp),
-        "attempts": 0,
-        "expires_at": (now + timedelta(minutes=OTP_EXPIRE_MINUTES)).isoformat(),
-        "last_sent_at": now.isoformat(),
-    }).execute()
-
-    send_verification_email(email=email, otp=otp)
-
-
-class GoogleOtpRequest(BaseModel):
-    email: EmailStr
-    otp: str
-
-
-@router.post("/google/verify-otp")
-def google_verify_otp(data: GoogleOtpRequest):
-
-    email = str(data.email).lower().strip()
-    otp = data.otp.strip()
-
-    if not (otp.isdigit() and len(otp) == 6):
-        raise HTTPException(status_code=400, detail="OTP harus 6 digit angka.")
-
-    admin = get_supabase_admin()
-
-    rows = (
-        admin.table("pending_registrations")
-        .select("*").eq("email", email).limit(1).execute().data
-    )
-
-    if not rows:
-        raise HTTPException(
-            status_code=400,
-            detail="OTP tidak ditemukan. Silakan login dengan Google lagi.",
-        )
-
-    pending = rows[0]
-    expires_at = datetime.fromisoformat(str(pending["expires_at"]).replace("Z", "+00:00"))
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-
-    if datetime.now(timezone.utc) > expires_at or (pending.get("attempts") or 0) >= MAX_OTP_ATTEMPTS:
-        admin.table("pending_registrations").delete().eq("email", email).execute()
-        raise HTTPException(
-            status_code=400,
-            detail="OTP kedaluwarsa atau terlalu banyak percobaan. Silakan login dengan Google lagi.",
-        )
-
-    if not secrets.compare_digest(str(pending["otp_hash"]).strip(), hash_otp(otp)):
-        admin.table("pending_registrations").update(
-            {"attempts": (pending.get("attempts") or 0) + 1}
-        ).eq("email", email).execute()
-        raise HTTPException(status_code=400, detail="OTP salah.")
-
-    try:
-        admin.auth.admin.update_user_by_id(
-            pending["user_id"], {"app_metadata": {"otp_verified": True}}
-        )
-        admin.table("pending_registrations").delete().eq("email", email).execute()
-
-        # Buat session lewat magic link, karena token Google tidak disimpan.
-        link = admin.auth.admin.generate_link({"type": "magiclink", "email": email})
-        auth_result = get_supabase_anon().auth.verify_otp({
-            "token_hash": link.properties.hashed_token,
-            "type": "magiclink",
-        })
-
-        user, session = auth_result.user, auth_result.session
-        metadata = user.user_metadata or {}
-
-        return {
-            "message": "Login berhasil!",
-            "user_id": user.id,
-            "name": metadata.get("full_name") or metadata.get("name") or "",
-            "email": user.email,
-            "picture": metadata.get("avatar_url") or metadata.get("picture") or "",
-            "token_type": "bearer",
-            "access_token": session.access_token,
-            "refresh_token": session.refresh_token,
-        }
-
-    except Exception as e:
-        print("ERROR GOOGLE VERIFY OTP:", repr(e))
-        raise HTTPException(status_code=400, detail="Verifikasi gagal. Silakan coba lagi.")
 
 
 @router.get("/google")
@@ -246,20 +142,18 @@ def google_callback(
         session = result.session
         metadata = user.user_metadata or {}
 
-        # Akun Google baru (belum pernah verifikasi OTP) tidak langsung
-        # login: kirim OTP ke email, token baru diberikan setelah OTP benar.
-        if needs_otp(user):
-            email = (user.email or "").lower().strip()
+        # Akun Google belum terdaftar: dari halaman login ditolak,
+        # dari halaman register langsung dibuat (email sudah diverifikasi Google, tanpa OTP).
+        if is_new_google_user(user):
+            admin = get_supabase_admin()
 
-            # Halaman login: akun belum terdaftar -> tolak, jangan buat akun.
             if oauth_mode != "register":
                 created = user.created_at
                 if created.tzinfo is None:
                     created = created.replace(tzinfo=timezone.utc)
                 # hapus akun yang baru saja dibuat otomatis oleh Google; akun lama dibiarkan
                 if (datetime.now(timezone.utc) - created).total_seconds() < 120:
-                    get_supabase_admin().auth.admin.delete_user(user.id)
-                    get_supabase_admin().table("pending_registrations").delete().eq("email", email).execute()
+                    admin.auth.admin.delete_user(user.id)
                 response = RedirectResponse(
                     url=f"{FRONTEND_URL}/#{urlencode({'error': 'Akun tidak terdaftar. Silakan daftar terlebih dahulu.'})}",
                     status_code=302,
@@ -268,19 +162,8 @@ def google_callback(
                 response.delete_cookie("oauth_mode")
                 return response
 
-            send_google_otp(
-                email,
-                user.id,
-                metadata.get("full_name") or metadata.get("name") or email,
-            )
-            response = RedirectResponse(
-                url=f"{FRONTEND_URL}/#{urlencode({'otp_required': 'true', 'email': email})}",
-                status_code=302,
-            )
-            response.delete_cookie(COOKIE_NAME)
-            return response
-
-        if oauth_mode == "register":
+            admin.auth.admin.update_user_by_id(user.id, {"app_metadata": {"registered": True}})
+        elif oauth_mode == "register":
             response = RedirectResponse(
                 url=f"{FRONTEND_URL}/#{urlencode({'error': 'Akun anda sudah terdaftar. Silakan login.'})}",
                 status_code=302,
