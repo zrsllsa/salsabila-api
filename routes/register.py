@@ -1,5 +1,7 @@
 import os
 
+import httpx
+
 import secrets
 
 import hashlib
@@ -78,7 +80,60 @@ def hash_otp(otp: str) -> str:
 # SEND OTP EMAIL
 # =========================================================
 
-def send_verification_email(
+SUBJECT = "Your verification code for About Salsabila"
+
+
+def _otp_text(otp: str) -> str:
+    return f"""Hello!
+
+Thank you for joining About Salsabila.
+
+I'm happy to welcome you! To complete your registration, please use the verification code below:
+
+{otp}
+
+This code is valid for {OTP_EXPIRE_MINUTES} minutes. Please make sure to enter it before it expires.
+
+If you didn't request this registration, you can safely ignore this email. For your security, please do not share this verification code with anyone.
+
+Warm regards,
+Salsabila
+"""
+
+
+def send_verification_email(email: str, otp: str):
+    """
+    Pakai Brevo (HTTPS) kalau BREVO_API_KEY diisi; kalau tidak, Gmail SMTP.
+    Hosting seperti Railway memblokir SMTP keluar, jadi di sana wajib Brevo.
+    """
+
+    api_key = os.getenv("BREVO_API_KEY")
+
+    if not api_key:
+        return _send_via_smtp(email, otp)
+
+    sender = os.getenv("BREVO_SENDER") or os.getenv("SMTP_EMAIL")
+
+    if not sender:
+        raise Exception("BREVO_SENDER tidak ditemukan")
+
+    response = httpx.post(
+        "https://api.brevo.com/v3/smtp/email",
+        headers={"api-key": api_key, "accept": "application/json"},
+        json={
+            "sender": {"name": APP_NAME, "email": sender},
+            "to": [{"email": email}],
+            "subject": SUBJECT,
+            "textContent": _otp_text(otp),
+        },
+        timeout=30,
+    )
+
+    if response.status_code >= 400:
+        raise Exception(f"Brevo {response.status_code}: {response.text}")
+
+
+def _send_via_smtp(
     email: str,
     otp: str
 ):
@@ -115,25 +170,9 @@ def send_verification_email(
 
     message["To"] = email
 
-    message["Subject"] = "Your verification code for About Salsabila"
+    message["Subject"] = SUBJECT
 
-    message.set_content(
-        f"""Hello!
-
-Thank you for joining About Salsabila.
-
-I'm happy to welcome you! To complete your registration, please use the verification code below:
-
-{otp}
-
-This code is valid for {OTP_EXPIRE_MINUTES} minutes. Please make sure to enter it before it expires.
-
-If you didn't request this registration, you can safely ignore this email. For your security, please do not share this verification code with anyone.
-
-Warm regards,
-Salsabila
-"""
-    )
+    message.set_content(_otp_text(otp))
 
 
     # -----------------------------------------------------
