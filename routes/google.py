@@ -250,6 +250,24 @@ def google_callback(
         # login: kirim OTP ke email, token baru diberikan setelah OTP benar.
         if needs_otp(user):
             email = (user.email or "").lower().strip()
+
+            # Halaman login: akun belum terdaftar -> tolak, jangan buat akun.
+            if oauth_mode != "register":
+                created = user.created_at
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                # hapus akun yang baru saja dibuat otomatis oleh Google; akun lama dibiarkan
+                if (datetime.now(timezone.utc) - created).total_seconds() < 120:
+                    get_supabase_admin().auth.admin.delete_user(user.id)
+                    get_supabase_admin().table("pending_registrations").delete().eq("email", email).execute()
+                response = RedirectResponse(
+                    url=f"{FRONTEND_URL}/#{urlencode({'error': 'Akun tidak terdaftar. Silakan daftar terlebih dahulu.'})}",
+                    status_code=302,
+                )
+                response.delete_cookie(COOKIE_NAME)
+                response.delete_cookie("oauth_mode")
+                return response
+
             send_google_otp(
                 email,
                 user.id,

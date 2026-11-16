@@ -18,6 +18,8 @@ from fastapi import APIRouter, HTTPException
 
 from pydantic import BaseModel, EmailStr
 
+from routes.login import find_user
+
 from supabase_client import get_supabase_admin
 
 
@@ -264,6 +266,18 @@ def register(data: RegisterRequest):
         # =================================================
         # 2. HAPUS PENDING LAMA (JIKA ADA)
         # =================================================
+
+        # Akun yang sudah terverifikasi tidak boleh dihapus/ditimpa oleh register
+        existing = find_user(email)
+
+        if existing and (
+            existing.email_confirmed_at
+            or (existing.app_metadata or {}).get("otp_verified")
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Akun anda sudah terdaftar. Silakan login."
+            )
 
         cleanup_pending(admin, email)
 
